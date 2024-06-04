@@ -10,7 +10,7 @@ def generate_launch_description():
 
     share_dir = get_package_share_directory('lio_sam')
     parameter_file = LaunchConfiguration('params_file')
-    xacro_path = os.path.join(share_dir, 'config', 'robot.urdf.xacro')
+    xacro_path = os.path.join(get_package_share_directory('rover_sim'), 'models/rover.xacro')
     rviz_config_file = os.path.join(share_dir, 'config', 'rviz2.rviz')
 
     params_declare = DeclareLaunchArgument(

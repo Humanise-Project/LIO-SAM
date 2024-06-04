@@ -30,6 +30,16 @@ POINT_CLOUD_REGISTER_POINT_STRUCT(OusterPointXYZIRT,
     (uint8_t, ring, ring) (uint16_t, noise, noise) (uint32_t, range, range)
 )
 
+struct GazeboPointXYZIRT {
+    PCL_ADD_POINT4D;
+    PCL_ADD_INTENSITY;
+    uint16_t ring;
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+} EIGEN_ALIGN16;
+POINT_CLOUD_REGISTER_POINT_STRUCT(GazeboPointXYZIRT,
+(float, x, x) (float, y, y) (float, z, z) (float, intensity, intensity) (uint16_t, ring, ring)
+)
+
 // Use the Velodyne point format as a common representation
 using PointXYZIRT = VelodynePointXYZIRT;
 
@@ -71,6 +81,7 @@ private:
 
     pcl::PointCloud<PointXYZIRT>::Ptr laserCloudIn;
     pcl::PointCloud<OusterPointXYZIRT>::Ptr tmpOusterCloudIn;
+    pcl::PointCloud<GazeboPointXYZIRT>::Ptr tmpGazeboCloudIn;
     pcl::PointCloud<PointType>::Ptr   fullCloud;
     pcl::PointCloud<PointType>::Ptr   extractedCloud;
 
@@ -137,6 +148,7 @@ public:
     {
         laserCloudIn.reset(new pcl::PointCloud<PointXYZIRT>());
         tmpOusterCloudIn.reset(new pcl::PointCloud<OusterPointXYZIRT>());
+        tmpGazeboCloudIn.reset(new pcl::PointCloud<GazeboPointXYZIRT>());
         fullCloud.reset(new pcl::PointCloud<PointType>());
         extractedCloud.reset(new pcl::PointCloud<PointType>());
 
@@ -251,6 +263,24 @@ public:
                 dst.intensity = src.intensity;
                 dst.ring = src.ring;
                 dst.time = src.t * 1e-9f;
+            }
+        }
+        else if (sensor == SensorType::GAZEBO)
+        {
+            // Convert to Velodyne format
+            pcl::moveFromROSMsg(currentCloudMsg, *tmpGazeboCloudIn);
+            laserCloudIn->points.resize(tmpGazeboCloudIn->size());
+            laserCloudIn->is_dense = tmpGazeboCloudIn->is_dense;
+            for (size_t i = 0; i < tmpGazeboCloudIn->size(); i++)
+            {
+                auto &src = tmpGazeboCloudIn->points[i];
+                auto &dst = laserCloudIn->points[i];
+                dst.x = src.x;
+                dst.y = src.y;
+                dst.z = src.z;
+                dst.intensity = src.intensity;
+                dst.ring = src.ring;
+                dst.time = 0.0;
             }
         }
         else
@@ -587,7 +617,7 @@ public:
                 continue;
 
             int columnIdn = -1;
-            if (sensor == SensorType::VELODYNE || sensor == SensorType::OUSTER)
+            if (sensor == SensorType::VELODYNE || sensor == SensorType::OUSTER || sensor == SensorType::GAZEBO)
             {
                 float horizonAngle = atan2(thisPoint.x, thisPoint.y) * 180 / M_PI;
                 static float ang_res_x = 360.0/float(Horizon_SCAN);
