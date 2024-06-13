@@ -1,6 +1,7 @@
 #include "utility.hpp"
 #include "lio_sam/msg/cloud_info.hpp"
 #include "lio_sam/srv/save_map.hpp"
+#include "lio_sam/srv/load_map.hpp"
 #include <gtsam/geometry/Rot3.h>
 #include <gtsam/geometry/Pose3.h>
 #include <gtsam/slam/PriorFactor.h>
@@ -15,6 +16,7 @@
 #include <gtsam/inference/Symbol.h>
 
 #include <gtsam/nonlinear/ISAM2.h>
+#include <fstream>
 
 using namespace gtsam;
 
@@ -73,6 +75,7 @@ public:
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pubLoopConstraintEdge;
 
     rclcpp::Service<lio_sam::srv::SaveMap>::SharedPtr srvSaveMap;
+    rclcpp::Service<lio_sam::srv::LoadMap>::SharedPtr srvLoadMap;
     rclcpp::Subscription<lio_sam::msg::CloudInfo>::SharedPtr subCloud;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr subGPS;
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr subLoop;
@@ -136,6 +139,8 @@ public:
     int laserCloudCornerLastDSNum = 0;
     int laserCloudSurfLastDSNum = 0;
 
+    int loadedMapSize = 0;
+
     bool aLoopIsClosed = false;
     map<int, int> loopIndexContainer; // from new to old
     vector<pair<int, int>> loopIndexQueue;
@@ -190,6 +195,73 @@ public:
             // save key frame transformations
             pcl::io::savePCDFileBinary(saveMapDirectory + "/trajectory.pcd", *cloudKeyPoses3D);
             pcl::io::savePCDFileBinary(saveMapDirectory + "/transformations.pcd", *cloudKeyPoses6D);
+
+            // save corner key frames
+            ofstream ofsCorner(saveMapDirectory + "/CornerKeyFrames.bin");
+            if (!ofsCorner.is_open()) {
+                throw std::runtime_error("Failed to open file for writing");
+            }
+            size_t numCornerClouds = cornerCloudKeyFrames.size();
+            ofsCorner.write(reinterpret_cast<const char*>(&numCornerClouds), sizeof(numCornerClouds));
+
+            for (const auto& cloud : cornerCloudKeyFrames) {
+                std::string tempFilename = saveMapDirectory + "/temp_corner_cloud.pcd";
+                pcl::io::savePCDFileBinary(tempFilename, *cloud);
+
+                std::ifstream ifsTemp(tempFilename, std::ios::binary | std::ios::ate);
+                if (!ifsTemp.is_open()) {
+                    throw std::runtime_error("Failed to open temp file for reading");
+                }
+
+                std::streamsize dataSize = ifsTemp.tellg();
+                ifsTemp.seekg(0, std::ios::beg);
+
+                std::vector<char> buffer(dataSize);
+                if (!ifsTemp.read(buffer.data(), dataSize)) {
+                    throw std::runtime_error("Failed to read temp file");
+                }
+
+                ofsCorner.write(reinterpret_cast<const char*>(&dataSize), sizeof(dataSize));
+                ofsCorner.write(buffer.data(), dataSize);
+
+                ifsTemp.close();
+                std::remove(tempFilename.c_str());
+            }
+            ofsCorner.close();
+
+            // save surface key frames
+            ofstream ofsSurf(saveMapDirectory + "/SurfKeyFrames.bin");
+            if (!ofsSurf.is_open()) {
+                throw std::runtime_error("Failed to open file for writing");
+            }
+            size_t numSurfClouds = surfCloudKeyFrames.size();
+            ofsSurf.write(reinterpret_cast<const char*>(&numSurfClouds), sizeof(numSurfClouds));
+
+            for (const auto& cloud : surfCloudKeyFrames) {
+                std::string tempFilename = saveMapDirectory + "/temp_surf_cloud.pcd";
+                pcl::io::savePCDFileBinary(tempFilename, *cloud);
+
+                std::ifstream ifsTemp(tempFilename, std::ios::binary | std::ios::ate);
+                if (!ifsTemp.is_open()) {
+                    throw std::runtime_error("Failed to open temp file for reading");
+                }
+
+                std::streamsize dataSize = ifsTemp.tellg();
+                ifsTemp.seekg(0, std::ios::beg);
+
+                std::vector<char> buffer(dataSize);
+                if (!ifsTemp.read(buffer.data(), dataSize)) {
+                    throw std::runtime_error("Failed to read temp file");
+                }
+
+                ofsSurf.write(reinterpret_cast<const char*>(&dataSize), sizeof(dataSize));
+                ofsSurf.write(buffer.data(), dataSize);
+
+                ifsTemp.close();
+                std::remove(tempFilename.c_str());
+            }
+            ofsSurf.close();
+
             // extract global point cloud map
             pcl::PointCloud<PointType>::Ptr globalCornerCloud(new pcl::PointCloud<PointType>());
             pcl::PointCloud<PointType>::Ptr globalCornerCloudDS(new pcl::PointCloud<PointType>());
@@ -234,8 +306,112 @@ public:
             cout << "Saving map to pcd files completed\n" << endl;
             return;
         };
-        
+        auto loadMapService = [this](const std::shared_ptr<rmw_request_id_t> request_header, const std::shared_ptr<lio_sam::srv::LoadMap::Request> req, std::shared_ptr<lio_sam::srv::LoadMap::Response> res) -> void {
+            (void)request_header;
+            string loadMapDirectory;
+            updateInitialGuess();
+            cout << "****************************************************" << endl;
+            cout << "Loading map from pcd files ..." << endl;
+            if(req->destination.empty()) loadMapDirectory = std::getenv("HOME") + savePCDDirectory;
+            else loadMapDirectory = std::getenv("HOME") + req->destination;
+            cout << "Load destination: " << loadMapDirectory << endl;
+            int ret = 0;
+            // load key frame transformations
+            if (pcl::io::loadPCDFile<PointType>(loadMapDirectory + "/trajectory.pcd", *cloudKeyPoses3D) == -1) {
+                // PCL_ERROR ("Couldn't read file " + loadMapDirectory + "/trajectory.pcd \n");
+                ret = -1;
+            }
+            if (pcl::io::loadPCDFile<PointTypePose>(loadMapDirectory + "/transformations.pcd", *cloudKeyPoses6D) == -1) {
+                // PCL_ERROR ("Couldn't read file " + loadMapDirectory + "/transformations.pcd \n");
+                ret = -1;
+            }
+            loadedMapSize = cloudKeyPoses3D->size();
+            // load corner key frames
+            std::ifstream ifsCorner(loadMapDirectory + "/CornerKeyFrames.bin", std::ios::binary);
+            if (!ifsCorner.is_open()) {
+                throw std::runtime_error("Failed to open file for reading");
+            }
+            size_t numCornerClouds;
+            ifsCorner.read(reinterpret_cast<char*>(&numCornerClouds), sizeof(numCornerClouds));
+            cornerCloudKeyFrames.clear();
+            cornerCloudKeyFrames.resize(numCornerClouds);
+
+            for (size_t i = 0; i < numCornerClouds; ++i) {
+                std::streamsize dataSize;
+                ifsCorner.read(reinterpret_cast<char*>(&dataSize), sizeof(dataSize));
+                std::vector<char> buffer(dataSize);
+                ifsCorner.read(buffer.data(), dataSize);
+
+                std::string tempFilename = loadMapDirectory + "/temp_corner_cloud.pcd";
+                std::ofstream ofsTemp(tempFilename, std::ios::binary);
+                ofsTemp.write(buffer.data(), dataSize);
+                ofsTemp.close();
+
+                cornerCloudKeyFrames[i] = std::make_shared<pcl::PointCloud<PointType>>();
+                pcl::io::loadPCDFile(tempFilename, *cornerCloudKeyFrames[i]);
+
+                std::remove(tempFilename.c_str());
+                cout << "Read corner cloud: " << i << endl;
+                cout << "   Size: " << cornerCloudKeyFrames[i]->size() << endl;
+                cout << "   Example point: " << cornerCloudKeyFrames[i]->points[0] << endl;
+            }
+            ifsCorner.close();
+
+            // load surface key frames
+            std::ifstream ifsSurf(loadMapDirectory + "/SurfKeyFrames.bin", std::ios::binary);
+            if (!ifsSurf.is_open()) {
+                throw std::runtime_error("Failed to open file for reading");
+            }
+            size_t numSurfClouds;
+            ifsSurf.read(reinterpret_cast<char*>(&numSurfClouds), sizeof(numSurfClouds));
+            surfCloudKeyFrames.clear();
+            surfCloudKeyFrames.resize(numSurfClouds);
+            for (size_t i = 0; i < numSurfClouds; ++i) {
+                std::streamsize dataSize;
+                ifsSurf.read(reinterpret_cast<char*>(&dataSize), sizeof(dataSize));
+                std::vector<char> buffer(dataSize);
+                ifsSurf.read(buffer.data(), dataSize);
+
+                std::string tempFilename = loadMapDirectory + "/temp_surf_cloud.pcd";
+                std::ofstream ofsTemp(tempFilename, std::ios::binary);
+                ofsTemp.write(buffer.data(), dataSize);
+                ofsTemp.close();
+
+                surfCloudKeyFrames[i] = std::make_shared<pcl::PointCloud<PointType>>();
+                pcl::io::loadPCDFile(tempFilename, *surfCloudKeyFrames[i]);
+
+                std::remove(tempFilename.c_str());
+                cout << "Read surface cloud: " << i << endl;
+                cout << "   Size: " << surfCloudKeyFrames[i]->size() << endl;
+                cout << "   Example point: " << surfCloudKeyFrames[i]->points[0] << endl;
+            }
+            ifsSurf.close();
+
+            // extract global point cloud map
+            pcl::PointCloud<PointType>::Ptr globalCornerCloud(new pcl::PointCloud<PointType>());
+            pcl::PointCloud<PointType>::Ptr globalSurfCloud(new pcl::PointCloud<PointType>());
+            pcl::PointCloud<PointType>::Ptr globalMapCloud(new pcl::PointCloud<PointType>());
+
+            // load corner cloud
+            if (pcl::io::loadPCDFile<PointType>(loadMapDirectory + "/CornerMap.pcd", *globalCornerCloud) == -1) {
+                //PCL_ERROR ("Couldn't read file " + loadMapDirectory + "/CornerMap.pcd \n");
+                ret = -1;
+            }
+            // load surf cloud
+            if (pcl::io::loadPCDFile<PointType>(loadMapDirectory + "/SurfMap.pcd", *globalSurfCloud) == -1) {
+                //PCL_ERROR ("Couldn't read file " + loadMapDirectory + "/SurfMap.pcd \n");
+                ret = -1;
+            }
+            *globalMapCloud += *globalCornerCloud;
+            *globalMapCloud += *globalSurfCloud;
+            res->success = ret == 0;
+            cout << "****************************************************" << endl;
+            cout << "Loading map from pcd files completed\n" << endl;
+            return;
+        };
+
         srvSaveMap = create_service<lio_sam::srv::SaveMap>("lio_sam/save_map", saveMapService);
+        srvLoadMap = create_service<lio_sam::srv::LoadMap>("lio_sam/load_map", loadMapService);
         pubHistoryKeyFrames = create_publisher<sensor_msgs::msg::PointCloud2>("lio_sam/mapping/icp_loop_closure_history_cloud", 1);
         pubIcpKeyFrames = create_publisher<sensor_msgs::msg::PointCloud2>("lio_sam/mapping/icp_loop_closure_history_cloud", 1);
         pubLoopConstraintEdge = create_publisher<visualization_msgs::msg::MarkerArray>("/lio_sam/mapping/loop_closure_constraints", 1);
@@ -313,20 +489,28 @@ public:
         {
             timeLastProcessing = timeLaserInfoCur;
 
+            // cout << "updateInitialGuess()" << endl;
             updateInitialGuess();
 
+            // cout << "extractSurroundingKeyFrames()" << endl;
             extractSurroundingKeyFrames();
 
+            // cout << "downsampleCurrentScan()" << endl;
             downsampleCurrentScan();
 
+            // cout << "scan2MapOptimization()" << endl;
             scan2MapOptimization();
 
+            // cout << "saveKeyFramesAndFactor()" << endl;
             saveKeyFramesAndFactor();
 
+            // cout << "correctPoses()" << endl;
             correctPoses();
 
+            // cout << "publishOdometry()" << endl;
             publishOdometry();
 
+            // cout << "publishFrames()" << endl;
             publishFrames();
         }
     }
@@ -338,6 +522,7 @@ public:
 
     void pointAssociateToMap(PointType const * const pi, PointType * const po)
     {
+        // cout << "transPointAssociateToMap(0,0): " << transPointAssociateToMap(0,0) << endl;
         po->x = transPointAssociateToMap(0,0) * pi->x + transPointAssociateToMap(0,1) * pi->y + transPointAssociateToMap(0,2) * pi->z + transPointAssociateToMap(0,3);
         po->y = transPointAssociateToMap(1,0) * pi->x + transPointAssociateToMap(1,1) * pi->y + transPointAssociateToMap(1,2) * pi->z + transPointAssociateToMap(1,3);
         po->z = transPointAssociateToMap(2,0) * pi->x + transPointAssociateToMap(2,1) * pi->y + transPointAssociateToMap(2,2) * pi->z + transPointAssociateToMap(2,3);
@@ -1383,7 +1568,7 @@ public:
 
     void addOdomFactor()
     {
-        if (cloudKeyPoses3D->points.empty())
+        if (cloudKeyPoses3D->size() == loadedMapSize)
         {
             noiseModel::Diagonal::shared_ptr priorNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-2, 1e-2, M_PI*M_PI, 1e8, 1e8, 1e8).finished()); // rad*rad, meter*meter
             gtSAMgraph.add(PriorFactor<Pose3>(0, trans2gtsamPose(transformTobeMapped), priorNoise));
@@ -1392,8 +1577,8 @@ public:
             noiseModel::Diagonal::shared_ptr odometryNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-4).finished());
             gtsam::Pose3 poseFrom = pclPointTogtsamPose3(cloudKeyPoses6D->points.back());
             gtsam::Pose3 poseTo   = trans2gtsamPose(transformTobeMapped);
-            gtSAMgraph.add(BetweenFactor<Pose3>(cloudKeyPoses3D->size()-1, cloudKeyPoses3D->size(), poseFrom.between(poseTo), odometryNoise));
-            initialEstimate.insert(cloudKeyPoses3D->size(), poseTo);
+            gtSAMgraph.add(BetweenFactor<Pose3>(cloudKeyPoses3D->size()-1-loadedMapSize, cloudKeyPoses3D->size()-loadedMapSize, poseFrom.between(poseTo), odometryNoise));
+            initialEstimate.insert(cloudKeyPoses3D->size()-loadedMapSize, poseTo);
         }
     }
 
@@ -1467,7 +1652,7 @@ public:
                 gtsam::Vector Vector3(3);
                 Vector3 << max(noise_x, 1.0f), max(noise_y, 1.0f), max(noise_z, 1.0f);
                 noiseModel::Diagonal::shared_ptr gps_noise = noiseModel::Diagonal::Variances(Vector3);
-                gtsam::GPSFactor gps_factor(cloudKeyPoses3D->size(), gtsam::Point3(gps_x, gps_y, gps_z), gps_noise);
+                gtsam::GPSFactor gps_factor(cloudKeyPoses3D->size()-loadedMapSize, gtsam::Point3(gps_x, gps_y, gps_z), gps_noise);
                 gtSAMgraph.add(gps_factor);
 
                 aLoopIsClosed = true;
@@ -1487,7 +1672,7 @@ public:
             int indexTo = loopIndexQueue[i].second;
             gtsam::Pose3 poseBetween = loopPoseQueue[i];
             gtsam::noiseModel::Diagonal::shared_ptr noiseBetween = loopNoiseQueue[i];
-            gtSAMgraph.add(BetweenFactor<Pose3>(indexFrom, indexTo, poseBetween, noiseBetween));
+            gtSAMgraph.add(BetweenFactor<Pose3>(indexFrom - loadedMapSize, indexTo - loadedMapSize, poseBetween, noiseBetween));
         }
 
         loopIndexQueue.clear();
@@ -1502,18 +1687,22 @@ public:
             return;
 
         // odom factor
+        // cout << "addOdomFactor()" << endl;
         addOdomFactor();
 
         // gps factor
+        // cout << "addGPSFactor()" << endl;
         addGPSFactor();
 
         // loop factor
+        // cout << "addLoopFactor()" << endl;
         addLoopFactor();
 
         // cout << "****************************************************" << endl;
         // gtSAMgraph.print("GTSAM Graph:\n");
 
         // update iSAM
+        // cout << "isam->update()" << endl;
         isam->update(gtSAMgraph, initialEstimate);
         isam->update();
 
@@ -1534,7 +1723,9 @@ public:
         PointTypePose thisPose6D;
         Pose3 latestEstimate;
 
+        // cout << "isam->calculateEstimate()" << endl;
         isamCurrentEstimate = isam->calculateEstimate();
+        // cout << "latestEstimate at: " << isamCurrentEstimate.size()-1 << endl;
         latestEstimate = isamCurrentEstimate.at<Pose3>(isamCurrentEstimate.size()-1);
         // cout << "****************************************************" << endl;
         // isamCurrentEstimate.print("Current estimate: ");

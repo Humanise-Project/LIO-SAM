@@ -335,7 +335,7 @@ public:
             deskewFlag = -1;
             for (auto &field : currentCloudMsg.fields)
             {
-                if (field.name == "time" || field.name == "t")
+                if (field.name == "time" || field.name == "t" || sensor == SensorType::GAZEBO)
                 {
                     deskewFlag = 1;
                     break;
