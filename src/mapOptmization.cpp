@@ -139,8 +139,6 @@ public:
     int laserCloudCornerLastDSNum = 0;
     int laserCloudSurfLastDSNum = 0;
 
-    int loadedMapSize = 0;
-
     bool aLoopIsClosed = false;
     map<int, int> loopIndexContainer; // from new to old
     vector<pair<int, int>> loopIndexQueue;
@@ -228,6 +226,7 @@ public:
                 std::remove(tempFilename.c_str());
             }
             ofsCorner.close();
+            cout << "Corner cloud key frames saved: " << numCornerClouds << endl;
 
             // save surface key frames
             ofstream ofsSurf(saveMapDirectory + "/SurfKeyFrames.bin");
@@ -261,6 +260,7 @@ public:
                 std::remove(tempFilename.c_str());
             }
             ofsSurf.close();
+            cout << "Surface cloud key frames saved: " << numSurfClouds << endl;
 
             // extract global point cloud map
             pcl::PointCloud<PointType>::Ptr globalCornerCloud(new pcl::PointCloud<PointType>());
@@ -325,7 +325,25 @@ public:
                 // PCL_ERROR ("Couldn't read file " + loadMapDirectory + "/transformations.pcd \n");
                 ret = -1;
             }
-            loadedMapSize = cloudKeyPoses3D->size();
+
+            //initialize gtSAMgraph with loaded transformations
+            gtSAMgraph.resize(0);
+            initialEstimate.clear();
+            noiseModel::Diagonal::shared_ptr priorNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-2, 1e-2, M_PI*M_PI, 1e8, 1e8, 1e8).finished()); // rad*rad, meter*meter
+            gtSAMgraph.add(PriorFactor<Pose3>(0, pclPointTogtsamPose3(cloudKeyPoses6D->points[0]), priorNoise));
+            initialEstimate.insert(0, pclPointTogtsamPose3(cloudKeyPoses6D->points[0]));
+            noiseModel::Diagonal::shared_ptr odometryNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-4).finished());
+            for (size_t i = 1; i < cloudKeyPoses3D->size(); ++i) {
+                Pose3 poseFrom = pclPointTogtsamPose3(cloudKeyPoses6D->points[i-1]);
+                Pose3 poseTo = pclPointTogtsamPose3(cloudKeyPoses6D->points[i]);
+
+                // Add BetweenFactor to the graph
+                gtSAMgraph.add(BetweenFactor<Pose3>(i-1, i, poseFrom.between(poseTo), odometryNoise));
+
+                // Insert the initial estimate
+                initialEstimate.insert(i, poseTo);
+            }
+
             // load corner key frames
             std::ifstream ifsCorner(loadMapDirectory + "/CornerKeyFrames.bin", std::ios::binary);
             if (!ifsCorner.is_open()) {
@@ -351,11 +369,10 @@ public:
                 pcl::io::loadPCDFile(tempFilename, *cornerCloudKeyFrames[i]);
 
                 std::remove(tempFilename.c_str());
-                cout << "Read corner cloud: " << i << endl;
-                cout << "   Size: " << cornerCloudKeyFrames[i]->size() << endl;
-                cout << "   Example point: " << cornerCloudKeyFrames[i]->points[0] << endl;
+                // cout << "Read corner cloud: " << i << "\n   Size: " << cornerCloudKeyFrames[i]->size() << endl;
             }
             ifsCorner.close();
+            cout << "Corner cloud key frames loaded: " << numCornerClouds << endl;
 
             // load surface key frames
             std::ifstream ifsSurf(loadMapDirectory + "/SurfKeyFrames.bin", std::ios::binary);
@@ -381,11 +398,10 @@ public:
                 pcl::io::loadPCDFile(tempFilename, *surfCloudKeyFrames[i]);
 
                 std::remove(tempFilename.c_str());
-                cout << "Read surface cloud: " << i << endl;
-                cout << "   Size: " << surfCloudKeyFrames[i]->size() << endl;
-                cout << "   Example point: " << surfCloudKeyFrames[i]->points[0] << endl;
+                // cout << "Read surface cloud: " << i << "\n   Size: " << surfCloudKeyFrames[i]->size() << endl;
             }
             ifsSurf.close();
+            cout << "Surface cloud key frames loaded: " << numSurfClouds << endl;
 
             // extract global point cloud map
             pcl::PointCloud<PointType>::Ptr globalCornerCloud(new pcl::PointCloud<PointType>());
@@ -1568,7 +1584,7 @@ public:
 
     void addOdomFactor()
     {
-        if (cloudKeyPoses3D->size() == loadedMapSize)
+        if (cloudKeyPoses3D->size() == 0)
         {
             noiseModel::Diagonal::shared_ptr priorNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-2, 1e-2, M_PI*M_PI, 1e8, 1e8, 1e8).finished()); // rad*rad, meter*meter
             gtSAMgraph.add(PriorFactor<Pose3>(0, trans2gtsamPose(transformTobeMapped), priorNoise));
@@ -1577,8 +1593,8 @@ public:
             noiseModel::Diagonal::shared_ptr odometryNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-4).finished());
             gtsam::Pose3 poseFrom = pclPointTogtsamPose3(cloudKeyPoses6D->points.back());
             gtsam::Pose3 poseTo   = trans2gtsamPose(transformTobeMapped);
-            gtSAMgraph.add(BetweenFactor<Pose3>(cloudKeyPoses3D->size()-1-loadedMapSize, cloudKeyPoses3D->size()-loadedMapSize, poseFrom.between(poseTo), odometryNoise));
-            initialEstimate.insert(cloudKeyPoses3D->size()-loadedMapSize, poseTo);
+            gtSAMgraph.add(BetweenFactor<Pose3>(cloudKeyPoses3D->size()-1, cloudKeyPoses3D->size(), poseFrom.between(poseTo), odometryNoise));
+            initialEstimate.insert(cloudKeyPoses3D->size(), poseTo);
         }
     }
 
@@ -1652,7 +1668,7 @@ public:
                 gtsam::Vector Vector3(3);
                 Vector3 << max(noise_x, 1.0f), max(noise_y, 1.0f), max(noise_z, 1.0f);
                 noiseModel::Diagonal::shared_ptr gps_noise = noiseModel::Diagonal::Variances(Vector3);
-                gtsam::GPSFactor gps_factor(cloudKeyPoses3D->size()-loadedMapSize, gtsam::Point3(gps_x, gps_y, gps_z), gps_noise);
+                gtsam::GPSFactor gps_factor(cloudKeyPoses3D->size(), gtsam::Point3(gps_x, gps_y, gps_z), gps_noise);
                 gtSAMgraph.add(gps_factor);
 
                 aLoopIsClosed = true;
@@ -1672,7 +1688,7 @@ public:
             int indexTo = loopIndexQueue[i].second;
             gtsam::Pose3 poseBetween = loopPoseQueue[i];
             gtsam::noiseModel::Diagonal::shared_ptr noiseBetween = loopNoiseQueue[i];
-            gtSAMgraph.add(BetweenFactor<Pose3>(indexFrom - loadedMapSize, indexTo - loadedMapSize, poseBetween, noiseBetween));
+            gtSAMgraph.add(BetweenFactor<Pose3>(indexFrom, indexTo, poseBetween, noiseBetween));
         }
 
         loopIndexQueue.clear();
