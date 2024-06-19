@@ -39,39 +39,39 @@ def generate_launch_description():
                 'robot_description': Command(['xacro', ' ', xacro_path])
             }]
         ),
-        Node(
-            package='lio_sam',
-            executable='lio_sam_imuPreintegration',
-            name='lio_sam_imuPreintegration',
-            parameters=[parameter_file],
-            output='screen'
-        ),
-        Node(
-            package='lio_sam',
-            executable='lio_sam_imageProjection',
-            name='lio_sam_imageProjection',
-            parameters=[parameter_file],
-            output='screen'
-        ),
-        Node(
-            package='lio_sam',
-            executable='lio_sam_featureExtraction',
-            name='lio_sam_featureExtraction',
-            parameters=[parameter_file],
-            output='screen'
-        ),
-        Node(
-            package='lio_sam',
-            executable='lio_sam_mapOptimization',
-            name='lio_sam_mapOptimization',
-            parameters=[parameter_file],
-            output='screen'
-        ),
-        Node(
-            package='rviz2',
-            executable='rviz2',
-            name='rviz2',
-            arguments=['-d', rviz_config_file],
-            output='screen'
-        )
+        # Node(
+        #     package='lio_sam',
+        #     executable='lio_sam_imuPreintegration',
+        #     name='lio_sam_imuPreintegration',
+        #     parameters=[parameter_file],
+        #     output='screen'
+        # ),
+        # Node(
+        #     package='lio_sam',
+        #     executable='lio_sam_imageProjection',
+        #     name='lio_sam_imageProjection',
+        #     parameters=[parameter_file],
+        #     output='screen'
+        # ),
+        # Node(
+        #     package='lio_sam',
+        #     executable='lio_sam_featureExtraction',
+        #     name='lio_sam_featureExtraction',
+        #     parameters=[parameter_file],
+        #     output='screen'
+        # ),
+        # Node(
+        #     package='lio_sam',
+        #     executable='lio_sam_mapOptimization',
+        #     name='lio_sam_mapOptimization',
+        #     parameters=[parameter_file],
+        #     output='screen'
+        # ),
+        # Node(
+        #     package='rviz2',
+        #     executable='rviz2',
+        #     name='rviz2',
+        #     arguments=['-d', rviz_config_file],
+        #     output='screen'
+        # )
     ])

@@ -39,7 +39,7 @@
     imuGyrBiasN: 1.0e-05
 
     imuGravity: 9.80
-    imuRPYWeight: 1.0
+    imuRPYWeight: 0.01
 
     extrinsicTrans:  [ -0.245,  0.0,  0.0 ]
     extrinsicRot:    [ 1.0,  0.0,  0.0,
